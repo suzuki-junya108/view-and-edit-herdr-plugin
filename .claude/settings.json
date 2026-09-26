@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(.dev.vars)",
+      "Read(**/.dev.vars)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.p8)",
+      "Read(**/*.p12)",
+      "Read(**/*.mobileprovision)",
+      "Read(**/secrets/**)",
+      "Read(**/*_secret*)",
+      "Read(**/*api*token*)",
+      "Read(**/*api*key*)",
+      "Read(**/credentials*)",
+      "Read(**/AuthKey_*.p8)"
+    ]
+  }
+}

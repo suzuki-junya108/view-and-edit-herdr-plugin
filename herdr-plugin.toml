@@ -1,0 +1,26 @@
+id = "view-and-edit"
+name = "View and Edit"
+version = "0.2.0"
+min_herdr_version = "0.9.0"
+description = "Preview, edit, and browse files (text, Markdown, HTML, images, video, audio, PDF, Office, data) in a popup. Japanese UI."
+platforms = ["macos"]
+
+[[actions]]
+id = "open"
+title = "View, edit, or browse the selected path"
+contexts = ["pane", "selection"]
+command = ["bin/view-and-edit", "action"]
+
+[[panes]]
+id = "app"
+title = "View and Edit"
+placement = "popup"
+width = "92%"
+height = "92%"
+command = ["bin/view-and-edit", "app"]
+
+[[link_handlers]]
+id = "file-link"
+title = "Open file link"
+pattern = "^file://"
+action = "open"
