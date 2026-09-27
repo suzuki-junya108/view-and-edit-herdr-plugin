@@ -55,7 +55,7 @@ class BrowserScreen(Screen):
     def load(self, select: Path | None = None) -> None:
         current = select or (self.selected.path if self.selected else None)
         try:
-            self.all_entries = list_directory(self.directory, self.show_hidden)
+            self.all_entries = self._read_entries()
             self.error = None
         except OSError as error:
             self.all_entries = []
@@ -68,6 +68,9 @@ class BrowserScreen(Screen):
                     break
         self._clamp()
         self._invalidate_preview()
+
+    def _read_entries(self) -> list[Entry]:
+        return list_directory(self.directory, self.show_hidden)
 
     def _apply_filter(self) -> None:
         needle = self.filter.lower()
@@ -97,6 +100,12 @@ class BrowserScreen(Screen):
         """The `..` row above the entries: a click target for going up without the keyboard."""
         return 1 if self.has_parent else 0
 
+    def _parent_label(self) -> str:
+        return "上のフォルダへ"
+
+    def _heading(self) -> str:
+        return home_relative(self.directory)
+
     def move(self, delta: int) -> None:
         if not self.entries:
             return
@@ -112,7 +121,7 @@ class BrowserScreen(Screen):
     def render(self, width: int, height: int) -> Frame:
         list_width = self._list_width(width)
         body_height = height - 2
-        header = Line().add(f" {home_relative(self.directory)} ", Style.TITLE)
+        header = Line().add(f" {self._heading()} ", Style.TITLE)
         if self.filter:
             header.add(f"  絞り込み: {self.filter}", Style.ACCENT)
         count = f"{len(self.entries)} 項目" + ("（隠しファイル表示中）" if self.show_hidden else "")
@@ -137,7 +146,9 @@ class BrowserScreen(Screen):
                 Line.of(" （何もありません）" if not self.filter else " （一致なし）", Style.DIM)
             ]
         if self.has_parent:
-            left.insert(0, Line().add("   ..", Style.DIRECTORY).add("  上のフォルダへ", Style.DIM))
+            left.insert(
+                0, Line().add("   ..", Style.DIRECTORY).add(f"  {self._parent_label()}", Style.DIM)
+            )
 
         right: list[Line] = []
         image = None
@@ -164,11 +175,15 @@ class BrowserScreen(Screen):
         name_width = width - 3 - (text_width(size) + 1 if size and width > 30 else 0)
         line = Line.of(" ▸ " if index == self.index else "   ")
         line.add(
-            fit(truncate(name, name_width), name_width), Style.DIRECTORY if entry.is_dir else ""
+            fit(self._fit_name(name, name_width), name_width),
+            Style.DIRECTORY if entry.is_dir else "",
         )
         if size and width > 30:
             line.add(" " + size, Style.DIM)
         return line.styled(Style.REVERSE) if index == self.index else line
+
+    def _fit_name(self, name: str, width: int) -> str:
+        return truncate(name, width)
 
     def _render_preview(
         self, row: int, col: int, width: int, height: int

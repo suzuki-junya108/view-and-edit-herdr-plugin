@@ -1,6 +1,6 @@
 [project]
 name = "view-and-edit-herdr-plugin"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.9"
 
 [tool.ruff]
@@ -19,6 +19,7 @@ ignore = ["PLR2004", "RUF001"]
 "view_and_edit/cli.py" = ["S603", "S606"]
 "view_and_edit/media.py" = ["S603", "S606", "S607"]
 "view_and_edit/editor.py" = ["S603"]
+"view_and_edit/locate.py" = ["S603", "S607"]
 
 [tool.mypy]
 strict = true

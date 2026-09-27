@@ -21,6 +21,8 @@ from view_and_edit.editor import EditorScreen
 from view_and_edit.formats import Kind
 from view_and_edit.keys import Key, Mouse, Paste
 from view_and_edit.media import PREVIEW_PIXELS, Cache, preview_png
+from view_and_edit.picker import PickerScreen
+from view_and_edit.target import Target
 from view_and_edit.viewer import ViewerScreen
 from view_and_edit.width import text_width
 
@@ -216,6 +218,94 @@ class BrowserTest(AppTestCase):
         self.assertIn("ゴミ箱に移動", self.screen_text())
         self.keys("x")
         self.assertNotIn("キー操作", self.screen_text())
+
+
+class PickerTest(AppTestCase):
+    def open_picker(self, note: str | None = None) -> PickerScreen:
+        targets = [
+            Target(self.files["code.py"], 150),
+            Target(self.files["data.csv"]),
+            Target(self.root / "gone.txt"),  # removed after the screen was read
+            Target(self.root / "subdir"),
+        ]
+        screen = PickerScreen(self.app, targets, self.root, "画面に出ているファイル", note)
+        self.app.push(screen)
+        return screen
+
+    def test_lists_the_picks_with_their_lines_under_a_heading(self) -> None:
+        screen = self.open_picker()
+        text = self.screen_text()
+        self.assertIn("画面に出ているファイル", text)
+        self.assertIn("code.py:150", text)
+        self.assertIn("subdir/", text)
+        self.assertIn("フォルダを見る", text)
+        self.assertNotIn("gone.txt", text)
+        self.assertEqual(
+            [e.path for e in screen.entries][:2], [self.files["code.py"], self.files["data.csv"]]
+        )
+
+    def test_enter_opens_at_the_line_and_q_comes_back(self) -> None:
+        screen = self.open_picker()
+        self.keys("enter")
+        self.assertIsInstance(self.app.top, ViewerScreen)
+        self.assertIn("150 x147 = 147", self.screen_text())
+        self.keys("q")
+        self.assertIs(self.app.top, screen)
+        self.keys("q")
+        self.assertFalse(self.app.running)
+
+    def test_edit_starts_at_the_line(self) -> None:
+        self.open_picker()
+        self.keys("e")
+        self.assertIsInstance(self.app.top, EditorScreen)
+        self.assertIn("150:1", self.screen_text())
+
+    def test_folder_pick_opens_the_browser_inside_it(self) -> None:
+        self.open_picker()
+        self.click("subdir/")
+        self.click("subdir/")
+        top = self.app.top
+        self.assertIsInstance(top, BrowserScreen)
+        self.assertNotIsInstance(top, PickerScreen)
+        self.assertEqual(
+            top.directory if isinstance(top, BrowserScreen) else None, self.root / "subdir"
+        )
+
+    def test_parent_row_and_left_open_the_file_browser(self) -> None:
+        screen = self.open_picker()
+        self.click("フォルダを見る")
+        self.assertIsInstance(self.app.top, BrowserScreen)
+        self.assertNotIsInstance(self.app.top, PickerScreen)
+        self.keys("q")
+        self.assertIs(self.app.top, screen)
+        self.keys("left")
+        self.assertIn("archive.zip", self.screen_text())
+
+    def test_long_paths_keep_their_file_name_and_nearby_files_are_relative(self) -> None:
+        deep = self.root / ("very-long-folder-name-" * 6) / "target-name.txt"
+        deep.parent.mkdir()
+        deep.write_text("x\n")
+        base = self.root / "subdir"
+        screen = PickerScreen(self.app, [Target(deep), Target(self.files["data.csv"])], base, "h")
+        self.app.push(screen)
+        text = self.screen_text()
+        self.assertIn("target-name.txt", text)
+        self.assertIn("…", text)
+        self.assertIn("../data.csv", text)
+
+    def test_folder_actions_are_not_offered(self) -> None:
+        self.open_picker()
+        self.keys("n")
+        self.keys("m")
+        self.keys("r")
+        self.assertIsNone(self.app.prompt)
+
+    def test_filter_and_note(self) -> None:
+        screen = self.open_picker(note="一部だけ探しました")
+        self.assertIn("一部だけ探しました", self.screen_text())
+        self.keys("/")
+        self.type("csv")
+        self.assertEqual([e.path for e in screen.entries], [self.files["data.csv"]])
 
 
 class ViewerTest(AppTestCase):

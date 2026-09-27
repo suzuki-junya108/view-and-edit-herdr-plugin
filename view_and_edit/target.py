@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from view_and_edit.locate import Locator
+
 # `src/a.ts:12`, `src/a.ts:12:5`, compiler output often adds a trailing colon.
 _LINE_COL_SUFFIX = re.compile(r"^(?P<path>.+?):(?P<line>\d+)(?::(?P<col>\d+))?:?$")
 # `src/a.py(12)` / `src/a.cs(12,5)` style used by Python tracebacks-ish tools and MSBuild.
@@ -127,18 +129,42 @@ def _first_existing(candidates: list[_Candidate], cwd: Path) -> Target | None:
     return None
 
 
-def resolve_selection(text: str, cwd: Path) -> Target:
-    """Resolve selected terminal text to an existing path.
+def _located(candidates: list[_Candidate], locator: Locator) -> list[Target]:
+    """Every indexed file a group of guesses could mean, for the first guess with any."""
+    for candidate in candidates:
+        paths = locator.find(candidate.text)
+        if paths:
+            return [Target(path, candidate.line, candidate.column) for path in paths]
+    return []
+
+
+def resolve_mention(text: str, cwd: Path, locator: Locator | None = None) -> list[Target]:
+    """Existing paths one token of terminal text can mean; empty when there are none.
+
+    A path that exists as written (relative to `cwd`) is the only answer. Otherwise the
+    token may be a bare file name or a path relative to some other folder of the
+    project, so every file in `locator` whose path ends with it is a candidate.
+    """
+    candidates = _text_candidates(text)
+    found = _first_existing(candidates, cwd)
+    if found:
+        return [found]
+    return _located(candidates, locator) if locator is not None else []
+
+
+def resolve_all(text: str, cwd: Path, locator: Locator | None = None) -> list[Target]:
+    """Resolve selected terminal text to the existing paths it can mean, best first.
 
     The whole selection is tried first so paths containing spaces work; after that
     each whitespace-separated token is tried in order, so selecting a line such as
-    `modified: src/app.ts` still finds the file.
+    `modified: src/app.ts` still finds the file. Exact paths win over index matches,
+    so a searched name is used only when nothing in the selection exists as written.
     """
     stripped = text.strip()
     if not stripped:
         raise TargetError("パスが選択されていません")
     if stripped.startswith("file://"):
-        return resolve_file_url(stripped, cwd)
+        return [resolve_file_url(stripped, cwd)]
 
     lines = [line for line in stripped.splitlines() if line.strip()]
     groups = [_text_candidates(lines[0])] if len(lines) == 1 else []
@@ -147,8 +173,19 @@ def resolve_selection(text: str, cwd: Path) -> Target:
     for group in groups:
         found = _first_existing(group, cwd)
         if found:
-            return found
-    raise TargetError(f"ファイルが見つかりません: {_shorten(stripped)}（基準: {cwd}）")
+            return [found]
+    if locator is not None:
+        for group in groups:
+            located = _located(group, locator)
+            if located:
+                return located
+    searched = "" if locator is None or locator.complete else "。大きいフォルダは一部だけ探しました"
+    raise TargetError(f"ファイルが見つかりません: {_shorten(stripped)}（基準: {cwd}）{searched}")
+
+
+def resolve_selection(text: str, cwd: Path, locator: Locator | None = None) -> Target:
+    """The best existing path for selected text (see `resolve_all`)."""
+    return resolve_all(text, cwd, locator)[0]
 
 
 def resolve_file_url(url: str, cwd: Path, local_hostnames: set[str] | None = None) -> Target:
