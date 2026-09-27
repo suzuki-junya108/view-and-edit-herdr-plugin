@@ -9,6 +9,7 @@ import pyexpat
 import re
 import sqlite3
 import tarfile
+import weakref
 import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -341,20 +342,32 @@ def archive_lines(path: Path) -> list[Line]:
 
 
 # ---- SQLite -------------------------------------------------------------------
+class _SqliteReader:
+    """The read-only connection behind a database's pages.
+
+    Rows are fetched while the pages are on screen, so the connection has to outlive
+    this function; it is closed as soon as the last page referring to it is dropped.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        weakref.finalize(self, conn.close)
+
+
 def sqlite_pages(path: Path) -> list[Page]:
     """One page per table; rows are fetched only for the part being viewed."""
     uri = f"{path.resolve().as_uri()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    reader = _SqliteReader(sqlite3.connect(uri, uri=True, check_same_thread=False))
     names = [
         row[0]
-        for row in conn.execute(
+        for row in reader.conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
             " AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
     ]
     if not names:
         return [Page("（テーブルなし）", [Line.of("テーブルがありません", Style.DIM)])]
-    return [_sqlite_page(conn, name) for name in names]
+    return [_sqlite_page(reader, name) for name in names]
 
 
 def _quote_identifier(name: str) -> str:
@@ -374,7 +387,8 @@ def _select_from(
     return conn.execute(sql, params).fetchall()  # nosemgrep
 
 
-def _sqlite_page(conn: sqlite3.Connection, table: str) -> Page:
+def _sqlite_page(reader: _SqliteReader, table: str) -> Page:
+    conn = reader.conn
     columns = [
         str(row[0]) for row in conn.execute("SELECT name FROM pragma_table_info(?)", (table,))
     ]
@@ -408,8 +422,13 @@ def _sqlite_page(conn: sqlite3.Connection, table: str) -> Page:
         row = index - len(header)
         block = row // _SQLITE_FETCH
         if block not in cache:
+            # Through `reader`, so the page keeps the connection open while it is shown.
             cache[block] = _select_from(
-                conn, table, "*", " LIMIT ? OFFSET ?", (_SQLITE_FETCH, block * _SQLITE_FETCH)
+                reader.conn,
+                table,
+                "*",
+                " LIMIT ? OFFSET ?",
+                (_SQLITE_FETCH, block * _SQLITE_FETCH),
             )
         values = cache[block][row % _SQLITE_FETCH]
         return row_line([cell(v) for v in values])

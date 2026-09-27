@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from view_and_edit.target import Target, TargetError, resolve_file_url, resolve_selection
+from view_and_edit.locate import FileIndex, Locator, build_index
+from view_and_edit.target import (
+    Target,
+    TargetError,
+    resolve_all,
+    resolve_file_url,
+    resolve_selection,
+)
 
 LOCAL_HOSTS = {"", "localhost", "my-mac"}
 
@@ -68,6 +75,52 @@ class ResolveSelectionTest(unittest.TestCase):
     def test_empty_selection(self) -> None:
         with self.assertRaises(TargetError):
             self.resolve("  \n ")
+
+
+class ResolveAcrossProjectTest(unittest.TestCase):
+    """Names printed relative to somewhere other than the pane's cwd."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        for name in ("REQUIREMENTS.md", "pkg/browser.py", "pkg/sub/app.ts", "other/app.ts"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x\n")
+        self.cwd = self.root / "pkg"
+        self.locator = Locator([self.cwd], builder=lambda _root: build_index(self.root))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def resolve(self, text: str) -> list[Target]:
+        return resolve_all(text, self.cwd, self.locator)
+
+    def test_bare_name_elsewhere_in_the_project(self) -> None:
+        self.assertEqual(self.resolve("REQUIREMENTS.md"), [Target(self.root / "REQUIREMENTS.md")])
+
+    def test_line_suffix_survives_the_search(self) -> None:
+        self.assertEqual(
+            self.resolve("`sub/app.ts:12:5`"), [Target(self.root / "pkg/sub/app.ts", 12, 5)]
+        )
+
+    def test_several_matches_are_all_offered_nearest_first(self) -> None:
+        self.assertEqual(
+            self.resolve("app.ts"),
+            [Target(self.root / "other/app.ts"), Target(self.root / "pkg/sub/app.ts")],
+        )
+
+    def test_exact_path_wins_over_search(self) -> None:
+        self.assertEqual(self.resolve("browser.py"), [Target(self.root / "pkg/browser.py")])
+
+    def test_exact_token_later_in_the_line_wins_over_a_searched_earlier_one(self) -> None:
+        self.assertEqual(self.resolve("app.ts browser.py"), [Target(self.root / "pkg/browser.py")])
+
+    def test_missing_everywhere_says_when_the_search_was_partial(self) -> None:
+        partial = Locator([self.cwd], builder=lambda root: FileIndex(root, [], complete=False))
+        with self.assertRaises(TargetError) as caught:
+            resolve_all("nope.md", self.cwd, partial)
+        self.assertIn("一部だけ", str(caught.exception))
 
 
 class ResolveFileUrlTest(unittest.TestCase):
