@@ -81,6 +81,7 @@ class HtmlPreviewOfflineTest(unittest.TestCase):
         server = http.server.HTTPServer(("127.0.0.1", 0), _CountingHandler)
         port = server.server_address[1]
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)  # cleanups run last-in first-out
         self.addCleanup(server.shutdown)
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "page.html"
