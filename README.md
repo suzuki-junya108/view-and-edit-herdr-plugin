@@ -1,5 +1,7 @@
 # View and Edit — herdr プラグイン
 
+日本語 | [English](README.en.md)
+
 > A [herdr](https://herdr.dev) plugin that previews, edits, and browses files in a popup:
 > text, Markdown, HTML, images, video, audio, PDF, Office documents, CSV/JSON, SQLite and more.
 > **macOS only. The interface is in Japanese.**
@@ -26,7 +28,7 @@ herdr の画面に出ているファイルのパスから、そのファイル�
 | もの | 用途 | 備考 |
 |---|---|---|
 | macOS | 必須 | Linux / Windows は未対応 |
-| [herdr](https://herdr.dev) 0.9.0 以上 | 必須 | |
+| [herdr](https://herdr.dev) 0.9.1 以上 | 必須 | |
 | Python 3.9 以上 | 必須 | macOS 標準の `python3` で動きます。初めて使うときに「コマンドライン・デベロッパ・ツール」のインストールを求められたら入れてください（`xcode-select --install`） |
 | 画像を表示できる端末 | 画像・動画・PDF などの表示 | Kitty graphics に対応した端末（Ghostty、kitty、WezTerm など）。動作確認は Ghostty で行っています |
 | Google Chrome | HTML の見た目の表示 | 無ければ macOS のクイックルックで代用（文字コード指定のない日本語 HTML は文字化けすることがあります） |
@@ -224,7 +226,7 @@ description = "view or edit selected path"
 ## 更新・削除
 
 herdr には更新専用のコマンドがないため、同じコマンドでもう一度インストールすると最新版になります。
-特定の版を使いたいときは `--ref v0.5.0` のように指定します。
+特定の版を使いたいときは `--ref v0.5.1` のように指定します。
 
 ```bash
 herdr plugin install suzuki-junya108/view-and-edit-herdr-plugin      # 更新
