@@ -15,6 +15,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from view_and_edit.gitinfo import GIT_COMMAND
+
 # Folders that hold generated or vendored files: walking them is slow and a match
 # inside them is almost never the file the user meant.
 SKIP_DIRS = frozenset(
@@ -52,7 +54,7 @@ GIT_TIMEOUT_SECONDS = 5.0
 def git_toplevel(directory: Path) -> Path | None:
     try:
         result = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+            [*GIT_COMMAND, "-C", str(directory), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
@@ -69,7 +71,7 @@ def _git_files(top: Path) -> list[str] | None:
     try:
         result = subprocess.run(
             [
-                "git",
+                *GIT_COMMAND,
                 "-C",
                 str(top),
                 "ls-files",
