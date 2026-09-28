@@ -1,8 +1,16 @@
-"""File browser: list on the left, live preview on the right (like Finder's column view)."""
+"""List screens with a live preview on the right (like Finder's column view).
+
+`BrowserScreen` lists a folder, `PickerScreen` a fixed set of files (the ones on the
+pane's screen, or every match of a name), and `SearchScreen` the project's files
+matching what the user types.
+"""
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 from pathlib import Path
 
 from view_and_edit.app import IDLE_TICK, App, Choice, Screen, home_relative, mouse_in
@@ -14,12 +22,15 @@ from view_and_edit.documents import (
 )
 from view_and_edit.editor import EditorScreen
 from view_and_edit.formats import Kind, detect, is_editable
-from view_and_edit.keys import Event, Key, Mouse
+from view_and_edit.fuzzy import rank
+from view_and_edit.keys import Event, Key, Mouse, Paste
+from view_and_edit.locate import FileIndex, build_index
 from view_and_edit.media import copy_to_clipboard, move_to_trash, open_external
 from view_and_edit.structured import human_size
+from view_and_edit.target import Target
 from view_and_edit.ui import Frame, ImagePlacement, Line, Style, render_line
 from view_and_edit.viewer import PREVIEW_IMAGE_SLOT, ContentPane, ViewerScreen
-from view_and_edit.width import fit, text_width, truncate
+from view_and_edit.width import fit, text_width, truncate, truncate_left
 
 LIST_MIN_WIDTH = 24
 LIST_MAX_WIDTH = 44
@@ -106,6 +117,12 @@ class BrowserScreen(Screen):
     def _heading(self) -> str:
         return home_relative(self.directory)
 
+    def _count_label(self) -> str:
+        return f"{len(self.entries)} 項目" + ("（隠しファイル表示中）" if self.show_hidden else "")
+
+    def _empty_label(self) -> str:
+        return " （何もありません）" if not self.filter else " （一致なし）"
+
     def move(self, delta: int) -> None:
         if not self.entries:
             return
@@ -124,7 +141,7 @@ class BrowserScreen(Screen):
         header = Line().add(f" {self._heading()} ", Style.TITLE)
         if self.filter:
             header.add(f"  絞り込み: {self.filter}", Style.ACCENT)
-        count = f"{len(self.entries)} 項目" + ("（隠しファイル表示中）" if self.show_hidden else "")
+        count = self._count_label()
         header.add(" " * max(1, width - header.width() - text_width(count) - 1)).add(
             count, Style.DIM
         )
@@ -142,9 +159,7 @@ class BrowserScreen(Screen):
         if self.error:
             left = [Line.of(f" {self.error}", Style.ERROR)]
         elif not self.entries:
-            left = [
-                Line.of(" （何もありません）" if not self.filter else " （一致なし）", Style.DIM)
-            ]
+            left = [Line.of(self._empty_label(), Style.DIM)]
         if self.has_parent:
             left.insert(
                 0, Line().add("   ..", Style.DIRECTORY).add(f"  {self._parent_label()}", Style.DIM)
@@ -239,6 +254,7 @@ class BrowserScreen(Screen):
             ("Enter", "開く"),
             ("←", "上へ"),
             ("/", "絞り込み"),
+            ("f", "探す"),
             ("e", "編集"),
             ("n", "新規"),
             ("q", "閉じる"),
@@ -250,6 +266,7 @@ class BrowserScreen(Screen):
             ("Enter / →", "開く（フォルダなら中へ）"),
             ("← / Backspace", "ひとつ上のフォルダへ"),
             ("/", "名前で絞り込み（Esc で解除）"),
+            ("f", "ファイル名で探す（下の階層も含めてプロジェクト全体から）"),
             ("e", "内蔵エディタで編集"),
             ("o", "既定のアプリで開く（Finder など）"),
             ("n", "新しいファイル"),
@@ -291,6 +308,7 @@ class BrowserScreen(Screen):
             "h": self.go_up,
             "backspace": self.go_up,
             "/": self._ask_filter,
+            "f": self._open_search,
             ".": self._toggle_hidden,
             "~": lambda: self.change_directory(Path.home()),
             "e": self._edit_selected,
@@ -365,6 +383,9 @@ class BrowserScreen(Screen):
             self.change_directory(entry.path)
         else:
             self.app.push(ViewerScreen(self.app, entry.path))
+
+    def _open_search(self) -> None:
+        self.app.push(SearchScreen(self.app, self.directory))
 
     def _edit_selected(self) -> None:
         entry = self.selected
@@ -481,3 +502,282 @@ class BrowserScreen(Screen):
             f"「{entry.name}」をゴミ箱に移動しますか？",
             [Choice("y", "はい", trash), Choice("n", "いいえ", lambda: None)],
         )
+
+
+# Browser keys that act on "the current folder", which a list of picks does not have.
+_FOLDER_ONLY_KEYS = frozenset({"n", "m", "r", ".", "~"})
+# Picks are paths rather than names, so the list gets more of the width than the browser's.
+PICK_LIST_RATIO = 0.5
+PICK_LIST_MAX_WIDTH = 72
+# `../../docs/a.md` still reads as "near here"; further away, a `~/` path is clearer.
+_MAX_PARENT_STEPS = 2
+
+
+def label_for(target: Target, base: Path) -> str:
+    """How a pick is listed: relative to the pane's folder when near it, with its line."""
+    relative = os.path.relpath(target.path, base)
+    if relative.split(os.sep).count("..") <= _MAX_PARENT_STEPS:
+        shown = relative
+    else:
+        shown = home_relative(target.path)
+    if target.is_dir:
+        shown += "/"
+    return f"{shown}:{target.line}" if target.line else shown
+
+
+class PickerScreen(BrowserScreen):
+    """The browser's list and live preview, over a fixed set of files.
+
+    The `..` row and `←` leave the list for the ordinary file browser of `base`.
+    """
+
+    def __init__(
+        self,
+        app: App,
+        targets: Sequence[Target],
+        base: Path,
+        heading: str,
+        note: str | None = None,
+    ) -> None:
+        self.targets = list(targets)
+        self.heading = heading
+        self._lines = {target.path: target.line for target in self.targets}
+        super().__init__(app, base)
+        if note:
+            app.message(note)
+
+    def _read_entries(self) -> list[Entry]:
+        entries = []
+        for target in self.targets:
+            try:
+                stat = target.path.stat()
+            except OSError:
+                continue  # trashed or moved since the screen was read
+            name = label_for(target, self.directory)
+            entries.append(Entry(name, target.path, target.is_dir, stat.st_size, stat.st_mtime))
+        return entries
+
+    @property
+    def has_parent(self) -> bool:
+        return True
+
+    def _parent_label(self) -> str:
+        return "フォルダを見る（ファイルブラウザ）"
+
+    def _heading(self) -> str:
+        return self.heading
+
+    def _list_width(self, width: int) -> int:
+        if width < PREVIEW_MIN_WIDTH:
+            return width
+        return max(LIST_MIN_WIDTH, min(PICK_LIST_MAX_WIDTH, int(width * PICK_LIST_RATIO)))
+
+    def _fit_name(self, name: str, width: int) -> str:
+        # The file name is at the end of a path; cut the folders in front instead.
+        return truncate_left(name, width)
+
+    def go_up(self) -> None:
+        self.app.push(BrowserScreen(self.app, self.directory))
+
+    def open_selected(self) -> None:
+        entry = self.selected
+        if entry is None:
+            return
+        if entry.is_dir and detect(entry.path) is Kind.DIRECTORY:
+            self.app.push(BrowserScreen(self.app, entry.path))
+        else:
+            self.app.push(ViewerScreen(self.app, entry.path, self._lines.get(entry.path)))
+
+    def _edit_selected(self) -> None:
+        entry = self.selected
+        if entry is None or entry.is_dir:
+            return
+        if not is_editable(detect(entry.path)):
+            self.app.error("この形式は内蔵エディタで編集できません（o でアプリを開けます）")
+            return
+        self.app.push(EditorScreen(self.app, entry.path, self._lines.get(entry.path)))
+
+    def hints(self) -> list[tuple[str, str]]:
+        return [
+            ("↑↓", "移動"),
+            ("Enter", "開く"),
+            ("e", "編集"),
+            ("/", "絞り込み"),
+            ("f", "探す"),
+            ("←", "フォルダを見る"),
+            ("q", "閉じる"),
+        ]
+
+    def help(self) -> list[tuple[str, str]]:
+        return [
+            ("↑↓ / j k", "移動（画面の下の方に出ていたものほど上に並びます）"),
+            ("Enter / →", "開く（行番号があればその行へ）"),
+            ("e", "内蔵エディタで編集"),
+            ("/", "名前で絞り込み（Esc で解除）"),
+            ("f", "ファイル名で探す（プロジェクト全体から）"),
+            ("← / Backspace", "今いるフォルダをファイルブラウザで見る"),
+            ("o", "既定のアプリで開く（Finder など）"),
+            ("c", "パスをコピー"),
+            ("d", "ゴミ箱に移動（確認あり）"),
+            ("マウス", "クリックで選択、ダブルクリックで開く、.. でファイルブラウザへ"),
+            ("", "下の案内（Enter 開く など）もクリックで押せます"),
+            ("q / Esc", "閉じる"),
+        ]
+
+    def handle(self, event: Event) -> None:
+        if isinstance(event, Key) and event.name in _FOLDER_ONLY_KEYS:
+            return
+        super().handle(event)
+
+
+# Searching is something the user asked for and waits on, so a folder outside git may
+# be walked longer than the automatic lookup behind the screen list.
+SEARCH_WALK_BUDGET_SECONDS = 3.0
+_POLL_SECONDS = 0.05
+
+
+def _search_index(directory: Path) -> FileIndex:
+    return build_index(directory, budget=SEARCH_WALK_BUDGET_SECONDS)
+
+
+class SearchScreen(PickerScreen):
+    """Type to narrow every file of the project; the list and preview follow each key."""
+
+    captures_text = True  # letters go into the query, not to browser shortcuts
+
+    def __init__(
+        self,
+        app: App,
+        directory: Path,
+        builder: Callable[[Path], FileIndex] = _search_index,
+    ) -> None:
+        self.query = ""
+        self.total = 0
+        self._results: list[str] = []
+        self._index: FileIndex | None = None
+        super().__init__(app, [], directory, "ファイル名で探す")
+        self._future: Future[FileIndex] = app.background(lambda: builder(directory))
+
+    # ---- data -------------------------------------------------------------
+    def _read_entries(self) -> list[Entry]:
+        index = self._index
+        if index is None:
+            return []
+        entries = []
+        for relative in self._results:
+            path = index.root / relative
+            try:
+                stat = path.stat()
+            except OSError:
+                continue  # listed by git but deleted since
+            is_dir = path.is_dir()
+            name = relative + ("/" if is_dir else "")
+            entries.append(Entry(name, path, is_dir, stat.st_size, stat.st_mtime))
+        return entries
+
+    def _search(self) -> None:
+        if self._index is None:
+            return
+        self._results, self.total = rank(self.query, self._index.paths)
+        self.index = 0
+        self.top = 0
+        self.load(select=None)
+        # `load` keeps the previous selection when it is still listed; a new query
+        # should start from its best match instead.
+        self.index = 0
+        self._invalidate_preview()
+
+    def tick(self) -> None:
+        if self._index is None and self._future.done():
+            try:
+                self._index = self._future.result()
+            except OSError as error:
+                self.error = f"探せませんでした: {error}"
+                return
+            if not self._index.complete:
+                self.app.message("大きいフォルダなので一部だけ探しています")
+            self._search()
+
+    def tick_interval(self) -> float:
+        if self._index is None:
+            return _POLL_SECONDS
+        return min(super().tick_interval(), IDLE_TICK)
+
+    def resume(self) -> None:
+        # Coming back from a file: keep the query and the list as they were.
+        current = self.selected.path if self.selected else None
+        self.load(select=current)
+
+    # ---- rendering --------------------------------------------------------
+    def _heading(self) -> str:
+        return f"探す: {self.query}"
+
+    @property
+    def has_parent(self) -> bool:
+        return False
+
+    def _empty_label(self) -> str:
+        if self._index is None:
+            return " 探しています…"
+        return " （一致なし）" if self.query else " （ファイルがありません）"
+
+    def _count_label(self) -> str:
+        if self._index is None:
+            return ""
+        if self.total > len(self._results):
+            return f"{self.total} 件中 上位 {len(self._results)} 件"
+        return f"{self.total} 件"
+
+    def render(self, width: int, height: int) -> Frame:
+        frame = super().render(width, height)
+        # The text cursor sits after the query, like any input field.
+        return Frame(frame.lines, (0, 1 + text_width(self._heading())), frame.images)
+
+    def hints(self) -> list[tuple[str, str]]:
+        return [("↑↓", "選ぶ"), ("Enter", "開く"), ("Esc", "戻る")]
+
+    def help(self) -> list[tuple[str, str]]:
+        return [
+            (
+                "文字を入力",
+                "名前の一部で絞り込み（順番どおりに含んでいれば当たり。例: srcag → src/agent.py）",
+            ),
+            ("", "ファイル名に当たったもの、続けて当たったもの、短いパスほど上に並びます"),
+            ("↑↓ / PgUp PgDn", "選ぶ"),
+            ("Enter", "開く（フォルダならファイルブラウザで中を見る）"),
+            ("Backspace / Ctrl+U", "1 文字消す / 全部消す"),
+            ("マウス", "クリックで選択、ダブルクリックで開く、ホイールで移動"),
+            ("Esc", "元の画面に戻る"),
+        ]
+
+    # ---- input ------------------------------------------------------------
+    def handle(self, event: Event) -> None:
+        if isinstance(event, Mouse):
+            self._mouse(event)
+            return
+        if isinstance(event, Paste):
+            self._set_query(self.query + " ".join(event.text.split()))
+            return
+        if not isinstance(event, Key):
+            return
+        _, height = self.app.terminal.size()
+        page = max(1, height - 3)
+        moves = {"up": -1, "down": 1, "pageup": -page, "pagedown": page}
+        name = event.name
+        if name in moves:
+            self.move(moves[name])
+        elif name == "enter":
+            self.open_selected()
+        elif name in ("escape", "ctrl+c", "ctrl+g"):
+            self.app.pop()
+        elif name == "backspace":
+            self._set_query(self.query[:-1])
+        elif name == "ctrl+u":
+            self._set_query("")
+        elif event.char and event.char.isprintable():
+            self._set_query(self.query + event.char)
+
+    def _set_query(self, query: str) -> None:
+        if query != self.query:
+            self.query = query
+            self._search()

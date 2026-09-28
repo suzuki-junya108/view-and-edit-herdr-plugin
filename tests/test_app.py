@@ -8,20 +8,23 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
 from tests.fixtures import make_samples, tiny_png
 from view_and_edit import kitty
 from view_and_edit.app import App
-from view_and_edit.browser import BrowserScreen
+from view_and_edit.browser import BrowserScreen, PickerScreen, SearchScreen
 from view_and_edit.editor import EditorScreen
 from view_and_edit.formats import Kind
+from view_and_edit.fuzzy import MAX_RESULTS
 from view_and_edit.keys import Key, Mouse, Paste
+from view_and_edit.locate import FileIndex
 from view_and_edit.media import PREVIEW_PIXELS, Cache, preview_png
-from view_and_edit.picker import PickerScreen
 from view_and_edit.target import Target
 from view_and_edit.viewer import ViewerScreen
 from view_and_edit.width import text_width
@@ -306,6 +309,155 @@ class PickerTest(AppTestCase):
         self.keys("/")
         self.type("csv")
         self.assertEqual([e.path for e in screen.entries], [self.files["data.csv"]])
+
+
+class SearchTest(AppTestCase):
+    def open_search(
+        self, directory: Path | None = None, builder: Callable[[Path], FileIndex] | None = None
+    ) -> SearchScreen:
+        where = directory or self.root
+        screen = (
+            SearchScreen(self.app, where)
+            if builder is None
+            else SearchScreen(self.app, where, builder)
+        )
+        self.app.push(screen)
+        return screen
+
+    def wait_for_index(self, timeout: float = 10.0) -> str:
+        """Tick the screen, as the app's loop would, until the file list has been read."""
+        deadline = time.monotonic() + timeout
+        text = self.screen_text()
+        while "探しています…" in text and time.monotonic() < deadline:
+            time.sleep(0.02)
+            self.app.top.tick()
+            text = self.screen_text()
+        return text
+
+    def names(self, screen: SearchScreen) -> list[str]:
+        return [e.name for e in screen.entries]
+
+    def test_typing_narrows_and_enter_opens_then_comes_back_with_the_query(self) -> None:
+        screen = self.open_search()
+        self.wait_for_index()
+        self.type("insid")
+        text = self.screen_text()
+        self.assertIn("探す: insid", text)
+        self.assertEqual(self.names(screen)[0], "subdir/inside.txt")
+        self.keys("enter")
+        self.assertIsInstance(self.app.top, ViewerScreen)
+        self.assertIn("inside", self.settle())
+        self.keys("q")
+        self.assertIs(self.app.top, screen)
+        self.assertEqual(screen.query, "insid")
+        self.assertEqual(
+            screen.selected.path if screen.selected else None, self.root / "subdir" / "inside.txt"
+        )
+
+    def test_best_match_is_selected_after_each_key(self) -> None:
+        screen = self.open_search()
+        self.wait_for_index()
+        self.type("data")
+        self.keys("down", "down")
+        self.type(".js")
+        self.assertEqual(screen.index, 0)
+        self.assertEqual(self.names(screen)[0], "data.json")
+
+    def test_folders_are_found_and_open_in_the_browser(self) -> None:
+        screen = self.open_search()
+        self.wait_for_index()
+        self.type("subdir")
+        self.assertEqual(self.names(screen)[0], "subdir/")
+        self.keys("enter")
+        top = self.app.top
+        self.assertIsInstance(top, BrowserScreen)
+        self.assertNotIsInstance(top, PickerScreen)
+        self.assertEqual(
+            top.directory if isinstance(top, BrowserScreen) else None, self.root / "subdir"
+        )
+
+    def test_letters_go_into_the_query_not_to_shortcuts(self) -> None:
+        screen = self.open_search()
+        self.wait_for_index()
+        self.type("qen?")
+        self.assertIs(self.app.top, screen)
+        self.assertIsNone(self.app.prompt)
+        self.assertFalse(self.app.help_visible)
+        self.assertEqual(screen.query, "qen?")
+        self.assertIn("（一致なし）", self.screen_text())
+
+    def test_backspace_ctrl_u_and_paste_edit_the_query(self) -> None:
+        screen = self.open_search()
+        self.wait_for_index()
+        self.type("codex")
+        self.assertEqual(screen.entries, [])
+        self.keys("backspace")
+        self.assertEqual(self.names(screen)[0], "code.py")
+        self.keys("ctrl+u")
+        self.assertEqual(screen.query, "")
+        self.assertIn("subdir/", self.names(screen))
+        self.app.dispatch(Paste("sheet\n.xlsx"))
+        self.assertEqual(
+            screen.query, "sheet .xlsx"
+        )  # a line break is a space, and spaces are ignored
+        self.assertEqual(self.names(screen), ["sheet.xlsx"])
+
+    def test_escape_goes_back(self) -> None:
+        browser = BrowserScreen(self.app, self.root)
+        self.app.push(browser)
+        self.keys("f")
+        self.assertIsInstance(self.app.top, SearchScreen)
+        self.keys("escape")
+        self.assertIs(self.app.top, browser)
+
+    def test_browser_f_searches_the_whole_repository_from_a_subfolder(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        browser = BrowserScreen(self.app, self.root / "subdir")
+        self.app.push(browser)
+        self.assertIn("f 探す", self.screen_text())
+        self.keys("f")
+        top = self.app.top
+        self.assertIsInstance(top, SearchScreen)
+        self.wait_for_index()
+        self.type("code.py")
+        self.assertEqual(
+            top.entries[0].path if isinstance(top, SearchScreen) else None, self.files["code.py"]
+        )
+
+    def test_waits_for_the_file_list_and_keeps_what_was_typed(self) -> None:
+        ready = threading.Event()
+
+        def slow(directory: Path) -> FileIndex:
+            ready.wait(10)
+            return FileIndex(
+                directory, ["code.py", "notes.md", "subdir", "subdir/inside.txt"], complete=False
+            )
+
+        screen = self.open_search(builder=slow)
+        self.assertIn("探しています…", self.screen_text())
+        self.type("note")
+        self.assertIn("探す: note", self.screen_text())
+        ready.set()
+        text = self.wait_for_index()
+        self.assertEqual(self.names(screen), ["notes.md"])
+        self.assertIn("一部だけ探しています", text)
+        self.assertIn("1 件", text)
+
+    def test_long_result_lists_are_capped_with_the_full_count(self) -> None:
+        many = self.root / "many"
+        many.mkdir()
+        names = [f"many/item{i:03}.txt" for i in range(MAX_RESULTS + 50)]
+        for name in names:
+            (self.root / name).write_text("x\n")
+        screen = self.open_search(builder=lambda d: FileIndex(d, names, complete=True))
+        text = self.wait_for_index()
+        self.assertIn(f"{len(names)} 件中 上位 {MAX_RESULTS} 件", text)
+        self.assertEqual(len(screen.entries), MAX_RESULTS)
+
+    def test_help_is_on_f1(self) -> None:
+        self.open_search()
+        self.keys("f1")
+        self.assertIn("名前の一部で絞り込み", self.screen_text())
 
 
 class ViewerTest(AppTestCase):
