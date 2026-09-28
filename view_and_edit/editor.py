@@ -155,7 +155,7 @@ class EditorScreen(Screen):
             ("Ctrl+F", "検索（Enter で次、F3 / Ctrl+N で次、Shift+F3 / Ctrl+P で前）"),
             ("Ctrl+G", "指定行へ移動"),
             ("Ctrl+S", "保存"),
-            ("Ctrl+Q / Ctrl+W", "閉じる（未保存なら確認）"),
+            ("Esc / Ctrl+Q / Ctrl+W", "閉じる（未保存なら確認。選択中の Esc は選択の解除）"),
             ("マウス", "クリックでカーソル移動、ドラッグで選択、ホイールでスクロール"),
             ("", "下の案内（^S 保存 など）もクリックで押せます"),
         ]
@@ -219,7 +219,7 @@ class EditorScreen(Screen):
             "ctrl+g": self._ask_goto,
             "ctrl+a": buf.select_all,
             "ctrl+c": self._copy,
-            "escape": lambda: setattr(buf, "anchor", None),
+            "escape": self._escape,
         }
         if name in commands:
             commands[name]()
@@ -337,6 +337,14 @@ class EditorScreen(Screen):
             )
         else:
             write()
+
+    def _escape(self) -> None:
+        # Esc goes back on every screen. A selection is cleared first, so a stray Esc
+        # after Shift+arrows does not close the file.
+        if self.buffer.selection() is not None:
+            self.buffer.anchor = None
+        else:
+            self.request_close()
 
     def request_close(self) -> None:
         if not self.buffer.dirty:
