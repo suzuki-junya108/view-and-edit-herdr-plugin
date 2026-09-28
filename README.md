@@ -203,7 +203,7 @@ description = "view or edit selected path"
 ## 更新・削除
 
 herdr には更新専用のコマンドがないため、同じコマンドでもう一度インストールすると最新版になります。
-特定の版を使いたいときは `--ref v0.4.0` のように指定します。
+特定の版を使いたいときは `--ref v0.4.1` のように指定します。
 
 ```bash
 herdr plugin install suzuki-junya108/view-and-edit-herdr-plugin      # 更新
