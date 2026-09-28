@@ -9,7 +9,14 @@ from pathlib import Path
 
 from view_and_edit import kitty
 from view_and_edit.app import IDLE_TICK, App, Screen, home_relative
-from view_and_edit.documents import Document, View, open_document, page_lines
+from view_and_edit.documents import (
+    CHANGES_VIEW,
+    Document,
+    View,
+    open_document,
+    page_lines,
+    with_changes_view,
+)
 from view_and_edit.editor import EditorScreen
 from view_and_edit.formats import Kind
 from view_and_edit.keys import Event, Key, Mouse
@@ -226,7 +233,7 @@ class ViewerScreen(Screen):
     def __init__(self, app: App, path: Path, line: int | None = None) -> None:
         self.app = app
         self.path = path
-        self.pane = ContentPane(app, open_document(path, app.cache), VIEWER_IMAGE_SLOT, line)
+        self.pane = ContentPane(app, self._open(), VIEWER_IMAGE_SLOT, line)
         self.video: VideoPlayer | None = None
         self.audio: AudioPlayer | None = None
         self._duration: float | None = None
@@ -237,11 +244,18 @@ class ViewerScreen(Screen):
     def doc(self) -> Document:
         return self.pane.doc
 
+    def _open(self) -> Document:
+        return with_changes_view(open_document(self.path, self.app.cache))
+
+    def _changes_index(self) -> int | None:
+        for index, view in enumerate(self.doc.views):
+            if view.name == CHANGES_VIEW:
+                return index
+        return None
+
     def reload(self) -> None:
         old = self.pane
-        self.pane = ContentPane(
-            self.app, open_document(self.path, self.app.cache), VIEWER_IMAGE_SLOT
-        )
+        self.pane = ContentPane(self.app, self._open(), VIEWER_IMAGE_SLOT)
         self.pane.view_index = min(old.view_index, len(self.pane.doc.views) - 1)
         self.pane.scroll, self.pane.page, self.pane.query = old.scroll, old.page, old.query
 
@@ -302,8 +316,10 @@ class ViewerScreen(Screen):
             line.add(f" {title}", Style.ACCENT)
         elif title:
             line.add(f"   {title}", Style.ACCENT)
+        # A text file shows its encoding while it has no tabs besides its changes.
+        own_views = len(self.doc.views) - (0 if self._changes_index() is None else 1)
         for label, value in self.doc.facts:
-            if label in ("文字コード", "改行") and len(self.doc.views) == 1:
+            if label in ("文字コード", "改行") and own_views == 1:
                 line.add(f"  {value}", Style.DIM)
         self._tab_targets = targets
         return line.window(0, width)
@@ -359,6 +375,8 @@ class ViewerScreen(Screen):
             hints += [("↑↓", "スクロール"), ("/", "検索")]
         if len(self.doc.views) > 1:
             hints.append(("Tab", "表示切替"))
+        if self._changes_index() is not None:
+            hints.append(("d", "変更点"))
         if self.doc.editable:
             hints.append(("e", "編集"))
         hints += [("o", "アプリで開く"), ("q", "戻る")]
@@ -372,6 +390,10 @@ class ViewerScreen(Screen):
             ("←→", "ページ移動（無ければ横スクロール、動画・音声は 5 秒移動）"),
             ("Shift+←→", "横スクロール"),
             ("Tab", "表示切替（表示 ⇄ ソース など）"),
+            (
+                "d",
+                "変更点（最後のコミットからの差分）⇄ 元の表示。Git で管理された文字のファイルのみ",
+            ),
             ("/  n  N", "検索 / 次 / 前"),
             ("e", "内蔵エディタで編集"),
             ("o", "既定のアプリで開く"),
@@ -417,6 +439,7 @@ class ViewerScreen(Screen):
             "/": lambda: self.app.ask("検索", self._start_search, initial=pane.query),
             "e": self._edit,
             "o": self._open_external,
+            "d": self._toggle_changes,
         }
         if name in simple:
             simple[name]()
@@ -450,6 +473,14 @@ class ViewerScreen(Screen):
             self.app.invalidate()
 
         return select
+
+    def _toggle_changes(self) -> None:
+        changes = self._changes_index()
+        if changes is None:
+            self.app.error("変更点は、Git で管理されている文字のファイルだけ表示できます")
+            return
+        self.pane.select_view(0 if self.pane.view_index == changes else changes)
+        self.app.invalidate()
 
     def _open_external(self) -> None:
         error = open_external(self.path)

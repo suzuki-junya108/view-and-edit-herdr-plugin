@@ -23,6 +23,7 @@ from view_and_edit.documents import (
 from view_and_edit.editor import EditorScreen
 from view_and_edit.formats import Kind, detect, is_editable
 from view_and_edit.fuzzy import rank
+from view_and_edit.gitinfo import GitStatus, read_status
 from view_and_edit.keys import Event, Key, Mouse, Paste
 from view_and_edit.locate import FileIndex, build_index
 from view_and_edit.media import copy_to_clipboard, move_to_trash, open_external
@@ -33,6 +34,8 @@ from view_and_edit.viewer import PREVIEW_IMAGE_SLOT, ContentPane, ViewerScreen
 from view_and_edit.width import fit, text_width, truncate, truncate_left
 
 LIST_MIN_WIDTH = 24
+# However long the counts on the right get, this much of the heading stays readable.
+HEADING_MIN_WIDTH = 12
 LIST_MAX_WIDTH = 44
 LIST_RATIO = 0.36
 # Only show the side preview when the popup is wide enough for both columns.
@@ -41,6 +44,8 @@ PREVIEW_MIN_WIDTH = 70
 PREVIEW_DELAY = 0.12
 DOUBLE_CLICK_SECONDS = 0.4
 WHEEL_LINES = 3
+# How often to look whether background work (git status, the search index) is done.
+_POLL_SECONDS = 0.05
 
 
 class BrowserScreen(Screen):
@@ -60,7 +65,12 @@ class BrowserScreen(Screen):
         self._last_click: tuple[float, int] = (0.0, -1)
         # A file started with `n` exists only once the editor saves it; select it on return.
         self._new_file: Path | None = None
+        self._shown_heading = ""  # the heading as last drawn (maybe shortened)
+        # Git change marks arrive from the background; until then the list shows none.
+        self._git: GitStatus | None = None
+        self._git_future: Future[GitStatus | None] | None = None
         self.load(select)
+        self._refresh_git()
 
     # ---- data -------------------------------------------------------------
     def load(self, select: Path | None = None) -> None:
@@ -82,6 +92,14 @@ class BrowserScreen(Screen):
 
     def _read_entries(self) -> list[Entry]:
         return list_directory(self.directory, self.show_hidden)
+
+    @property
+    def git_loading(self) -> bool:
+        return self._git_future is not None
+
+    def _refresh_git(self) -> None:
+        directory = self.directory
+        self._git_future = self.app.background(lambda: read_status(directory))
 
     def _apply_filter(self) -> None:
         needle = self.filter.lower()
@@ -123,6 +141,11 @@ class BrowserScreen(Screen):
     def _empty_label(self) -> str:
         return " （何もありません）" if not self.filter else " （一致なし）"
 
+    def _git_label(self) -> str:
+        if self._git is None or not self._git.count:
+            return ""
+        return f"変更 {self._git.count} 件  "
+
     def move(self, delta: int) -> None:
         if not self.entries:
             return
@@ -138,10 +161,15 @@ class BrowserScreen(Screen):
     def render(self, width: int, height: int) -> Frame:
         list_width = self._list_width(width)
         body_height = height - 2
-        header = Line().add(f" {self._heading()} ", Style.TITLE)
-        if self.filter:
-            header.add(f"  絞り込み: {self.filter}", Style.ACCENT)
-        count = self._count_label()
+        count = self._git_label() + self._count_label()
+        filtering = f"  絞り込み: {self.filter}" if self.filter else ""
+        # The counts on the right always stay visible; a long folder path gives way,
+        # keeping its end (the folder's own name).
+        room = width - text_width(count) - text_width(filtering) - 4
+        self._shown_heading = truncate_left(self._heading(), max(HEADING_MIN_WIDTH, room))
+        header = Line().add(f" {self._shown_heading} ", Style.TITLE)
+        if filtering:
+            header.add(filtering, Style.ACCENT)
         header.add(" " * max(1, width - header.width() - text_width(count) - 1)).add(
             count, Style.DIM
         )
@@ -189,6 +217,10 @@ class BrowserScreen(Screen):
         size = "" if entry.is_dir else human_size(entry.size)
         name_width = width - 3 - (text_width(size) + 1 if size and width > 30 else 0)
         line = Line.of(" ▸ " if index == self.index else "   ")
+        if self._git is not None:
+            mark = self._git.mark_for(entry.path, entry.is_dir)
+            line.add(mark.letter if mark else " ", mark.style if mark else "").add(" ")
+            name_width -= 2
         line.add(
             fit(self._fit_name(name, name_width), name_width),
             Style.DIRECTORY if entry.is_dir else "",
@@ -238,14 +270,22 @@ class BrowserScreen(Screen):
             self._preview_for = entry.path
         return None
 
+    def tick(self) -> None:
+        future = self._git_future
+        if future is not None and future.done():
+            self._git_future = None
+            self._git = future.result() if future.exception() is None else None
+
     def tick_interval(self) -> float:
         # Wake up right when the cursor has rested long enough to build the preview.
         remaining = PREVIEW_DELAY - (time.monotonic() - self._moved_at)
-        return max(0.01, remaining) if remaining > 0 else IDLE_TICK
+        interval = max(0.01, remaining) if remaining > 0 else IDLE_TICK
+        return min(interval, _POLL_SECONDS) if self._git_future is not None else interval
 
     def resume(self) -> None:
         created, self._new_file = self._new_file, None
         self.load(select=created if created is not None and created.exists() else None)
+        self._refresh_git()  # the file may have been edited meanwhile
 
     # ---- input ------------------------------------------------------------
     def hints(self) -> list[tuple[str, str]]:
@@ -276,6 +316,7 @@ class BrowserScreen(Screen):
             ("c", "パスをコピー"),
             (".", "隠しファイルの表示切替"),
             ("~", "ホームフォルダへ"),
+            ("M A R ? U •", "Git の変更マーク（変更・追加・名前変更・新規・衝突・中に変更あり）"),
             ("マウス", "クリックで選択、ダブルクリックで開く、.. で上へ、ホイールで移動"),
             ("", "下の案内（Enter 開く など）もクリックで押せます"),
             ("q / Esc", "閉じる"),
@@ -370,6 +411,7 @@ class BrowserScreen(Screen):
         self.index = 0
         self.top = 0
         self.load(select)
+        self._refresh_git()
 
     def go_up(self) -> None:
         if self.has_parent:
@@ -619,6 +661,7 @@ class PickerScreen(BrowserScreen):
             ("o", "既定のアプリで開く（Finder など）"),
             ("c", "パスをコピー"),
             ("d", "ゴミ箱に移動（確認あり）"),
+            ("M A R ? U •", "Git の変更マーク（変更・追加・名前変更・新規・衝突・中に変更あり）"),
             ("マウス", "クリックで選択、ダブルクリックで開く、.. でファイルブラウザへ"),
             ("", "下の案内（Enter 開く など）もクリックで押せます"),
             ("q / Esc", "閉じる"),
@@ -633,7 +676,6 @@ class PickerScreen(BrowserScreen):
 # Searching is something the user asked for and waits on, so a folder outside git may
 # be walked longer than the automatic lookup behind the screen list.
 SEARCH_WALK_BUDGET_SECONDS = 3.0
-_POLL_SECONDS = 0.05
 
 
 def _search_index(directory: Path) -> FileIndex:
@@ -688,6 +730,7 @@ class SearchScreen(PickerScreen):
         self._invalidate_preview()
 
     def tick(self) -> None:
+        super().tick()
         if self._index is None and self._future.done():
             try:
                 self._index = self._future.result()
@@ -707,6 +750,7 @@ class SearchScreen(PickerScreen):
         # Coming back from a file: keep the query and the list as they were.
         current = self.selected.path if self.selected else None
         self.load(select=current)
+        self._refresh_git()
 
     # ---- rendering --------------------------------------------------------
     def _heading(self) -> str:
@@ -731,7 +775,7 @@ class SearchScreen(PickerScreen):
     def render(self, width: int, height: int) -> Frame:
         frame = super().render(width, height)
         # The text cursor sits after the query, like any input field.
-        return Frame(frame.lines, (0, 1 + text_width(self._heading())), frame.images)
+        return Frame(frame.lines, (0, 1 + text_width(self._shown_heading)), frame.images)
 
     def hints(self) -> list[tuple[str, str]]:
         return [("↑↓", "選ぶ"), ("Enter", "開く"), ("Esc", "戻る")]
@@ -746,6 +790,7 @@ class SearchScreen(PickerScreen):
             ("↑↓ / PgUp PgDn", "選ぶ"),
             ("Enter", "開く（フォルダならファイルブラウザで中を見る）"),
             ("Backspace / Ctrl+U", "1 文字消す / 全部消す"),
+            ("M A R ? U •", "Git の変更マーク（変更・追加・名前変更・新規・衝突・中に変更あり）"),
             ("マウス", "クリックで選択、ダブルクリックで開く、ホイールで移動"),
             ("Esc", "元の画面に戻る"),
         ]

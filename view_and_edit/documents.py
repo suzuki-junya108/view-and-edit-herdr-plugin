@@ -13,6 +13,7 @@ from pathlib import Path
 
 from view_and_edit import markdown, structured
 from view_and_edit.formats import Kind, detect, is_editable
+from view_and_edit.gitinfo import diff_lines, git_root
 from view_and_edit.media import (
     Cache,
     ImageRequest,
@@ -32,6 +33,7 @@ from view_and_edit.width import expand_tabs, wrap
 HIGHLIGHT_LIMIT_BYTES = 2 * 1024 * 1024
 # The browser's side preview stops here and asks the user to press Enter instead.
 QUICK_PREVIEW_LIMIT_BYTES = 5 * 1024 * 1024
+CHANGES_VIEW = "変更点"
 
 PagesFn = Callable[[int], list[Page]]
 ImageFn = Callable[[ImageRequest], Path]
@@ -375,6 +377,19 @@ def open_document(path: Path, cache: Cache, kind: Kind | None = None) -> Documen
     if kind is Kind.BINARY:
         return _hex_document(path, facts)
     return _text_document(path, facts)
+
+
+def with_changes_view(doc: Document) -> Document:
+    """Add a tab with the file's git diff, for text files inside a git work tree.
+
+    The diff itself is only taken when the tab is first shown.
+    """
+    if doc.editable and git_root(doc.path) is not None:
+        path = doc.path
+        doc.views.append(
+            View(CHANGES_VIEW, _safe(_cached(lambda _w: [Page("", diff_lines(path))])))
+        )
+    return doc
 
 
 def media_facts(path: Path) -> list[tuple[str, str]]:

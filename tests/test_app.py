@@ -460,6 +460,130 @@ class SearchTest(AppTestCase):
         self.assertIn("名前の一部で絞り込み", self.screen_text())
 
 
+class GitMarksTest(AppTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "c")
+
+    def git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+
+    def wait_for_git(self) -> str:
+        """Tick the top screen, as the app's loop would, until git status has arrived."""
+        screen = self.app.top
+        assert isinstance(screen, BrowserScreen)
+        deadline = time.monotonic() + 10
+        while screen.git_loading and time.monotonic() < deadline:
+            time.sleep(0.02)
+            screen.tick()
+        return self.screen_text()
+
+    def row(self, text: str, name: str) -> str:
+        return next(line for line in text.split("\n") if name in line)
+
+    def test_browser_marks_changed_new_and_folders(self) -> None:
+        self.files["code.py"].write_text("changed\n")
+        (self.root / "fresh.txt").write_text("new\n")
+        (self.root / "subdir" / "inside.txt").write_text("changed too\n")
+        self.app.push(BrowserScreen(self.app, self.root))
+        text = self.wait_for_git()
+        self.assertIn("変更 3 件", text)
+        self.assertIn("M code.py", self.row(text, "code.py"))
+        self.assertIn("? fresh.txt", self.row(text, "fresh.txt"))
+        self.assertIn("• subdir/", self.row(text, "subdir/"))
+        self.assertIn("  data.csv", self.row(text, "data.csv"))
+        self.keys("enter")  # into subdir
+        text = self.wait_for_git()
+        self.assertIn("M inside.txt", self.row(text, "inside.txt"))
+
+    def test_counts_stay_visible_under_a_long_folder_path(self) -> None:
+        deep = self.root / ("a-rather-long-folder-name-" * 5) / "project-folder"
+        deep.mkdir(parents=True)
+        (deep / "new.txt").write_text("n\n")
+        self.app.push(BrowserScreen(self.app, deep))
+        header = self.wait_for_git().split("\n")[0]
+        self.assertIn("変更 1 件", header)
+        self.assertIn("1 項目", header)
+        self.assertIn("…", header)
+        self.assertIn("project-folder", header)
+
+    def test_marks_follow_an_edit(self) -> None:
+        self.app.push(BrowserScreen(self.app, self.root, select=self.files["data.csv"]))
+        text = self.wait_for_git()
+        self.assertNotIn("変更", text.split("\n")[0])
+        self.keys("e")
+        self.type("x")
+        self.keys("ctrl+s", "ctrl+q")
+        text = self.wait_for_git()
+        self.assertIn("M data.csv", self.row(text, "data.csv"))
+        self.assertIn("変更 1 件", text)
+
+    def test_picker_and_search_show_marks(self) -> None:
+        self.files["notes.md"].write_text("# changed\n")
+        self.app.push(PickerScreen(self.app, [Target(self.files["notes.md"])], self.root, "h"))
+        self.assertIn("M notes.md", self.row(self.wait_for_git(), "notes.md"))
+        search = SearchScreen(self.app, self.root)
+        self.app.push(search)
+        deadline = time.monotonic() + 10
+        while "探しています" in self.screen_text() and time.monotonic() < deadline:
+            time.sleep(0.02)
+            search.tick()
+        self.type("notes")
+        self.assertIn("M notes.md", self.row(self.wait_for_git(), "notes.md"))
+
+    def test_viewer_changes_tab_and_d_key(self) -> None:
+        self.files["code.py"].write_text(
+            self.files["code.py"].read_text().replace("x5 = 5", "x5 = 'five'")
+        )
+        viewer = ViewerScreen(self.app, self.files["code.py"])
+        self.app.push(viewer)
+        text = self.screen_text()
+        self.assertIn(" 変更点 ", text)
+        self.assertIn("d 変更点", text)
+        self.assertIn("return 'こんにちは'", text)  # still opens on the file itself
+        self.assertIn("utf-8  LF", text)  # the changes tab does not hide the encoding
+        self.keys("d")
+        text = self.screen_text()
+        self.assertIn("+1 -1  最後のコミットからの変更", text)
+        self.assertIn("- x5 = 5", text)
+        self.assertIn("+ x5 = 'five'", text)
+        self.keys("d")
+        self.assertIn("return 'こんにちは'", self.screen_text())
+
+    def test_unchanged_file_and_non_text_files(self) -> None:
+        self.app.push(ViewerScreen(self.app, self.files["data.tsv"]))
+        self.keys("d")
+        self.assertIn("最後のコミットから変更はありません", self.screen_text())
+        self.app.push(ViewerScreen(self.app, self.files["image.png"]))
+        self.assertNotIn("変更点", self.screen_text())
+        self.keys("d")
+        self.assertIn("Git で管理されている文字のファイルだけ", self.screen_text())
+
+
+class NoGitTest(AppTestCase):
+    def test_outside_git_nothing_changes(self) -> None:
+        screen = BrowserScreen(self.app, self.root)
+        self.app.push(screen)
+        deadline = time.monotonic() + 10
+        while screen.git_loading and time.monotonic() < deadline:
+            time.sleep(0.02)
+            screen.tick()
+        text = self.screen_text()
+        self.assertNotIn("変更", text)
+        self.assertIn("   code.py", text)  # no mark column
+        self.app.push(ViewerScreen(self.app, self.files["code.py"]))
+        text = self.screen_text()
+        self.assertNotIn("変更点", text)
+        self.assertIn("utf-8  LF", text)
+
+
 class ViewerTest(AppTestCase):
     def view(self, name: str, line: int | None = None) -> ViewerScreen:
         screen = ViewerScreen(self.app, self.files[name], line)

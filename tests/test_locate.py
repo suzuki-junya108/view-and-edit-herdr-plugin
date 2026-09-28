@@ -57,6 +57,17 @@ class RepositoryIndexTest(unittest.TestCase):
         )
         self.assertEqual(self.index.find("generated.log"), [])
 
+    def test_repository_fsmonitor_hook_is_not_run(self) -> None:
+        # A folder received with its .git (say, from an archive) may carry config that
+        # tells git to run a command; listing its files must not run it.
+        marker = self.root / "hook-ran"
+        hook = self.root / "hook.sh"
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        hook.chmod(0o755)
+        git(self.root, "config", "core.fsmonitor", str(hook))
+        build_index(self.root)
+        self.assertFalse(marker.exists())
+
     def test_folders_and_dot_slash_prefix(self) -> None:
         self.assertEqual(self.index.find("view_and_edit/deep/"), [self.root / "view_and_edit/deep"])
         self.assertEqual(
