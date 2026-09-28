@@ -633,6 +633,34 @@ class EditorTest(AppTestCase):
         self.assertFalse(self.app.running)
         self.assertTrue(self.files["code.py"].read_text().startswith("def hello"))
 
+    def test_escape_goes_back_like_every_other_screen(self) -> None:
+        viewer = ViewerScreen(self.app, self.files["code.py"])
+        self.app.push(viewer)
+        self.keys("e")
+        self.assertIsInstance(self.app.top, EditorScreen)
+        self.keys("escape")
+        self.assertIs(self.app.top, viewer)
+
+    def test_escape_first_clears_a_selection(self) -> None:
+        screen = self.edit("code.py")
+        self.keys("shift+right", "shift+right")
+        self.assertIsNotNone(screen.buffer.selection())
+        self.keys("escape")
+        self.assertIs(self.app.top, screen)
+        self.assertIsNone(screen.buffer.selection())
+        self.keys("escape")
+        self.assertFalse(self.app.running)
+
+    def test_escape_with_unsaved_changes_asks_and_escape_again_keeps_editing(self) -> None:
+        screen = self.edit("code.py")
+        self.type("#")
+        self.keys("escape")
+        self.assertIn("変更を保存しますか", self.screen_text())
+        self.keys("escape")
+        self.assertIs(self.app.top, screen)
+        self.assertTrue(screen.buffer.dirty)
+        self.assertTrue(screen.buffer.lines[0].startswith("#"))
+
     def test_question_mark_is_typed_not_help(self) -> None:
         screen = self.edit("data.tsv")
         self.type("?")

@@ -78,7 +78,7 @@ description = "view or edit selected path"
 長いパスが端末やエージェントの表示で 2 行に折り返されていても、つなぎ直して探します。
 
 ファイルを開いたあとは `e` で編集、`o` で Finder などの既定のアプリで開きます。
-どの画面でも `?`（エディタでは `F1`）でキー操作の一覧が出ます。
+どの画面でも `Esc` でひとつ前の画面に戻り（最初の画面では閉じます）、`?`（エディタでは `F1`）でキー操作の一覧が出ます。
 手順つきの説明は [操作ガイド](docs/guide.md) にあります。
 
 ### 主なキー
@@ -146,7 +146,7 @@ description = "view or edit selected path"
 | キー | 動作 |
 |---|---|
 | Ctrl+S | 保存 |
-| Ctrl+Q / Ctrl+W | 閉じる（未保存なら確認） |
+| Esc / Ctrl+Q / Ctrl+W | 閉じる（未保存なら確認。範囲を選んでいるときの Esc は選択の解除） |
 | Ctrl+Z / Ctrl+Y | 元に戻す / やり直し |
 | Ctrl+C / X / V | コピー / 切り取り / 貼り付け（選択なしなら行ごと） |
 | Ctrl+A | すべて選択 |
@@ -203,7 +203,7 @@ description = "view or edit selected path"
 ## 更新・削除
 
 herdr には更新専用のコマンドがないため、同じコマンドでもう一度インストールすると最新版になります。
-特定の版を使いたいときは `--ref v0.4.0` のように指定します。
+特定の版を使いたいときは `--ref v0.4.2` のように指定します。
 
 ```bash
 herdr plugin install suzuki-junya108/view-and-edit-herdr-plugin      # 更新
