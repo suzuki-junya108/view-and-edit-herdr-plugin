@@ -1,6 +1,6 @@
 id = "view-and-edit"
 name = "View and Edit"
-version = "0.4.0"
+version = "0.4.1"
 min_herdr_version = "0.9.0"
 description = "Preview, edit, and browse files (text, Markdown, HTML, images, video, audio, PDF, Office, data) in a popup. Japanese UI."
 platforms = ["macos"]
@@ -15,8 +15,8 @@ command = ["bin/view-and-edit", "action"]
 id = "app"
 title = "View and Edit"
 placement = "popup"
-width = "92%"
-height = "92%"
+width = "100%"
+height = "100%"
 command = ["bin/view-and-edit", "app"]
 
 [[link_handlers]]
