@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import Union
 
 from view_and_edit.app import App, Screen, run_app
-from view_and_edit.browser import BrowserScreen
+from view_and_edit.browser import BrowserScreen, PickerScreen
 from view_and_edit.locate import Locator
-from view_and_edit.picker import PickerScreen
 from view_and_edit.screen_paths import files_on_screen
 from view_and_edit.target import Target, TargetError, resolve_all, resolve_file_url
 from view_and_edit.viewer import ViewerScreen
